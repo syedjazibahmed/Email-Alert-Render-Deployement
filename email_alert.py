@@ -1,4 +1,4 @@
-import imaplib, email, smtplib, os, json
+import imaplib, email, smtplib, os, json, re
 from email.mime.text import MIMEText
 from email.utils import formatdate, parsedate_to_datetime
 from dotenv import load_dotenv
@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 # ---------------- Config ----------------
 STATE_PATH = "state.json"
-THRESHOLD = 4
+EXPECTED_PARTS = {1, 2, 3}  # Expected numbering in subjects (e.g., 1, 2, 3)
 
 load_dotenv()
 
@@ -27,9 +27,10 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"last_check": None}
+        return {"completed_subjects": {}, "last_check": None}
     with open(STATE_PATH, "r") as f:
         return json.load(f)
+
 
 def save_state(state):
     with open(STATE_PATH, "w") as f:
@@ -37,10 +38,10 @@ def save_state(state):
 
 
 # ---------------- Email Alert ----------------
-def send_alert(subject, count):
-    body = f"ALERT: {count} emails received with subject '{subject}' in Bulleteconomics Gmail within the last hour."
+def send_alert(subject):
+    body = f"✅ ALERT: All parts (1, 2, 3) received for subject '{subject}' in Bulleteconomics Gmail."
     msg = MIMEText(body)
-    msg["Subject"] = f"[ALERT] {subject}"
+    msg["Subject"] = f"[ALERT] {subject} - Complete Set Received"
     msg["From"] = ALERT_EMAIL_SENDER
     msg["To"] = ALERT_EMAIL_RECIPIENT
     msg["Date"] = formatdate(localtime=True)
@@ -50,36 +51,58 @@ def send_alert(subject, count):
         server.login(ALERT_EMAIL_SENDER, ALERT_EMAIL_PASSWORD)
         server.sendmail(ALERT_EMAIL_SENDER, [ALERT_EMAIL_RECIPIENT], msg.as_string())
 
-    print(f"✅ Alert sent for subject: {subject} ({count} emails)")
+    print(f"📨 Alert sent for completed subject: {subject}")
+
+
+# ---------------- Subject Parsing ----------------
+def parse_subject(subject):
+    """
+    Extract base subject and numeric part (1, 2, 3 etc.)
+    Works with flexible formats like:
+    '1,hi', '(2).hi', '3/hi', 'hi 1', 'hi-2', 'hi_3'
+    """
+    subject = subject.strip()
+
+    # Try number at start
+    match = re.match(r"^[\(\[\{]*\s*([0-9]+)[\)\]\}]*[,\.\-_/:\s]*([^\d].*)$", subject)
+    if match:
+        part = int(match.group(1))
+        base = match.group(2).strip()
+        return base, part
+
+    # Try number at end
+    match = re.match(r"^(.*?[^\d])[\s,\.\-_/:\(\)\[\]]*([0-9]+)[\)\]\}]*\s*$", subject)
+    if match:
+        base = match.group(1).strip()
+        part = int(match.group(2))
+        return base, part
+
+    return subject, None
 
 
 # ---------------- Gmail Checker ----------------
 def check_gmail():
     state = load_state()
+    completed_subjects = state.get("completed_subjects", {})
     last_check_str = state.get("last_check")
-    # Use timezone-aware datetimes (UTC) everywhere to avoid naive/aware comparisons
+
     now = datetime.now(timezone.utc)
     if last_check_str:
-        # parse and ensure timezone-aware (if naive, assume UTC)
         try:
             last_check = datetime.fromisoformat(last_check_str)
         except Exception:
             last_check = now - timedelta(hours=1)
         if last_check.tzinfo is None:
             last_check = last_check.replace(tzinfo=timezone.utc)
-        else:
-            last_check = last_check.astimezone(timezone.utc)
     else:
         last_check = now - timedelta(hours=1)
 
     print(f"\n[{now}] Checking emails from the past 1 hour...")
 
-    # Connect to IMAP
     mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
     mail.login(MONITOR_EMAIL, MONITOR_PASS)
     mail.select("inbox")
 
-    # Search all messages since yesterday (IMAP can't do hours)
     since_date = (now - timedelta(days=1)).strftime("%d-%b-%Y")
     status, data = mail.search(None, f'(SINCE "{since_date}")')
 
@@ -90,7 +113,7 @@ def check_gmail():
         return
 
     mail_ids = data[0].split()
-    subject_counts = {}
+    new_parts = {}
 
     for mid in mail_ids:
         status, msg_data = mail.fetch(mid, "(RFC822)")
@@ -101,7 +124,6 @@ def check_gmail():
             email_date = parsedate_to_datetime(msg["Date"])
             if email_date is None:
                 raise ValueError("no date")
-            # Normalize to UTC and ensure tz-aware
             if email_date.tzinfo is None:
                 email_date = email_date.replace(tzinfo=timezone.utc)
             else:
@@ -109,24 +131,43 @@ def check_gmail():
         except Exception:
             email_date = now
 
-        # Only consider emails from the last hour
+        # Only consider emails from the last 1 hour
         if email_date < now - timedelta(hours=1):
             continue
 
         subject = msg["Subject"] or "No Subject"
-        subject_counts[subject] = subject_counts.get(subject, 0) + 1
+        base, part = parse_subject(subject)
+        if part is None:
+            continue
+
+        # Skip if subject already completed
+        if base in completed_subjects and completed_subjects[base].get("completed"):
+            continue
+
+        # Track received parts
+        if base not in new_parts:
+            new_parts[base] = set()
+        new_parts[base].add(part)
 
     mail.close()
     mail.logout()
 
-    # Check threshold
-    for subject, count in subject_counts.items():
-        if count >= THRESHOLD:
-            send_alert(subject, count)
+    # Merge with previous state and check for completion
+    for base, parts in new_parts.items():
+        prev = set(completed_subjects.get(base, {}).get("received", []))
+        updated = prev.union(parts)
 
-    # Save last check time (ISO with timezone)
+        if updated == EXPECTED_PARTS:
+            send_alert(base)
+            completed_subjects[base] = {"received": list(updated), "completed": True}
+        else:
+            completed_subjects[base] = {"received": list(updated), "completed": False}
+
+    # Save new state
+    state["completed_subjects"] = completed_subjects
     state["last_check"] = now.isoformat()
     save_state(state)
+
     print(f"✅ Completed check at {now}. Exiting...")
 
 
