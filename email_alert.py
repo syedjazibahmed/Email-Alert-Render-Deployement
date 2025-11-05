@@ -27,7 +27,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"completed_subjects": {}, "last_check": None}
+        return {"completed_subjects": {}, "seen_ids": []}
     with open(STATE_PATH, "r") as f:
         return json.load(f)
 
@@ -84,25 +84,14 @@ def parse_subject(subject):
 def check_gmail():
     state = load_state()
     completed_subjects = state.get("completed_subjects", {})
-    last_check_str = state.get("last_check")
+    seen_ids = set(state.get("seen_ids", []))
 
     now = datetime.now(timezone.utc)
-    if last_check_str:
-        try:
-            last_check = datetime.fromisoformat(last_check_str)
-        except Exception:
-            last_check = now - timedelta(hours=1)
-        if last_check.tzinfo is None:
-            last_check = last_check.replace(tzinfo=timezone.utc)
-    else:
-        last_check = now - timedelta(hours=1)
-
-    print(f"\n[{now}] Checking emails from the past 1 hour...")
-
     mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
     mail.login(MONITOR_EMAIL, MONITOR_PASS)
     mail.select("inbox")
 
+    # Search all messages from today (to limit the scope)
     since_date = (now - timedelta(days=1)).strftime("%d-%b-%Y")
     status, data = mail.search(None, f'(SINCE "{since_date}")')
 
@@ -131,6 +120,10 @@ def check_gmail():
         except Exception:
             email_date = now
 
+        # Only consider new emails
+        if mid.decode() in seen_ids:
+            continue
+
         # Only consider emails from the last 1 hour
         if email_date < now - timedelta(hours=1):
             continue
@@ -149,6 +142,9 @@ def check_gmail():
             new_parts[base] = set()
         new_parts[base].add(part)
 
+        # Mark the email as seen
+        seen_ids.add(mid.decode())
+
     mail.close()
     mail.logout()
 
@@ -165,15 +161,18 @@ def check_gmail():
 
     # Save new state
     state["completed_subjects"] = completed_subjects
-    state["last_check"] = now.isoformat()
+    state["seen_ids"] = list(seen_ids)
     save_state(state)
 
     print(f"✅ Completed check at {now}. Exiting...")
 
 
-# ---------------- Run Once ----------------
+# ---------------- Continuous Run ----------------
 if __name__ == "__main__":
-    try:
-        check_gmail()
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    while True:
+        try:
+            check_gmail()
+        except Exception as e:
+            print(f"❌ Error: {e}")
+        print(f"⏳ Sleeping for 60 seconds before checking again...\n")
+        time.sleep(60)  # Check every minute for new emails
