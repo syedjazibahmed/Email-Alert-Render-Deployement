@@ -3,6 +3,7 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, parsedate_to_datetime
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+import time  # Ensure we import the 'time' module
 
 # ---------------- Config ----------------
 STATE_PATH = "state.json"
@@ -27,7 +28,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"completed_subjects": {}, "seen_ids": []}
+        return {"completed_subjects": {}, "seen_ids": []}  # Include seen_ids in the state
     with open(STATE_PATH, "r") as f:
         return json.load(f)
 
@@ -84,7 +85,7 @@ def parse_subject(subject):
 def check_gmail():
     state = load_state()
     completed_subjects = state.get("completed_subjects", {})
-    seen_ids = set(state.get("seen_ids", []))
+    seen_ids = set(state.get("seen_ids", []))  # Track email IDs to avoid reprocessing emails
 
     now = datetime.now(timezone.utc)
     mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
@@ -105,6 +106,11 @@ def check_gmail():
     new_parts = {}
 
     for mid in mail_ids:
+        # Skip if this email ID has been processed already
+        if mid.decode() in seen_ids:
+            continue
+
+        # Fetch the email
         status, msg_data = mail.fetch(mid, "(RFC822)")
         raw = msg_data[0][1]
         msg = email.message_from_bytes(raw)
@@ -120,11 +126,7 @@ def check_gmail():
         except Exception:
             email_date = now
 
-        # Only consider new emails
-        if mid.decode() in seen_ids:
-            continue
-
-        # Only consider emails from the last 1 hour
+        # Only consider new emails (from the last 1 hour)
         if email_date < now - timedelta(hours=1):
             continue
 
@@ -142,7 +144,7 @@ def check_gmail():
             new_parts[base] = set()
         new_parts[base].add(part)
 
-        # Mark the email as seen
+        # Mark the email as seen (add its unique ID to seen_ids)
         seen_ids.add(mid.decode())
 
     mail.close()
@@ -159,7 +161,7 @@ def check_gmail():
         else:
             completed_subjects[base] = {"received": list(updated), "completed": False}
 
-    # Save new state
+    # Save new state (including seen email IDs)
     state["completed_subjects"] = completed_subjects
     state["seen_ids"] = list(seen_ids)
     save_state(state)
