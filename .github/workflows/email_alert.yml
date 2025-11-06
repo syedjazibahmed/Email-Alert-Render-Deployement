@@ -2,8 +2,8 @@ name: Email Alert Checker
 
 on:
   schedule:
-    - cron: "*/1 * * * *"  # Runs every minute (UTC time)
-  workflow_dispatch:      # Allows manual trigger from GitHub Actions tab
+    - cron: "*/1 * * * *"  # every minute
+  workflow_dispatch:        # manual trigger option
 
 jobs:
   run-script:
@@ -12,6 +12,12 @@ jobs:
     steps:
       - name: 🧾 Checkout repository
         uses: actions/checkout@v3
+
+      - name: 💾 Restore state
+        uses: actions/cache@v3
+        with:
+          path: state.json
+          key: email-alert-state
 
       - name: 🐍 Set up Python
         uses: actions/setup-python@v4
@@ -35,3 +41,10 @@ jobs:
           SMTP_HOST: "smtp.gmail.com"
           SMTP_PORT: "587"
         run: python email_alert.py
+
+      - name: 💾 Save state
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: state.json
+          key: email-alert-state

@@ -1,4 +1,4 @@
-import imaplib, email, smtplib, os, json, re
+import imaplib, email, smtplib, os, json, re, sys
 from email.mime.text import MIMEText
 from email.utils import formatdate, parsedate_to_datetime
 from dotenv import load_dotenv
@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 # ---------------- Config ----------------
 STATE_PATH = "state.json"
-EXPECTED_PARTS = {1, 2, 3}  # Expected numbering in subjects (e.g., 1, 2, 3)
+EXPECTED_PARTS = {1, 2, 3}
 
 load_dotenv()
 
@@ -27,7 +27,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"completed_subjects": {}, "seen_ids": []}  # Include seen_ids in the state
+        return {"completed_subjects": {}, "seen_ids": []}
     with open(STATE_PATH, "r") as f:
         return json.load(f)
 
@@ -56,27 +56,16 @@ def send_alert(subject):
 
 # ---------------- Subject Parsing ----------------
 def parse_subject(subject):
-    """
-    Extract base subject and numeric part (1, 2, 3 etc.)
-    Works with flexible formats like:
-    '1,hi', '(2).hi', '3/hi', 'hi 1', 'hi-2', 'hi_3'
-    """
+    """Extract base subject and numeric part like 1, 2, 3."""
     subject = subject.strip()
-
-    # Try number at start
+    # number at start
     match = re.match(r"^[\(\[\{]*\s*([0-9]+)[\)\]\}]*[,\.\-_/:\s]*([^\d].*)$", subject)
     if match:
-        part = int(match.group(1))
-        base = match.group(2).strip()
-        return base, part
-
-    # Try number at end
+        return match.group(2).strip(), int(match.group(1))
+    # number at end
     match = re.match(r"^(.*?[^\d])[\s,\.\-_/:\(\)\[\]]*([0-9]+)[\)\]\}]*\s*$", subject)
     if match:
-        base = match.group(1).strip()
-        part = int(match.group(2))
-        return base, part
-
+        return match.group(1).strip(), int(match.group(2))
     return subject, None
 
 
@@ -86,15 +75,14 @@ def check_gmail():
         state = load_state()
         completed_subjects = state.get("completed_subjects", {})
         seen_ids = set(state.get("seen_ids", []))
-
         now = datetime.now(timezone.utc)
+
         mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
         mail.login(MONITOR_EMAIL, MONITOR_PASS)
         mail.select("inbox")
 
         since_date = (now - timedelta(days=1)).strftime("%d-%b-%Y")
         status, data = mail.search(None, f'(SINCE "{since_date}")')
-
         if status != "OK":
             print("⚠️ No messages found or search failed.")
             return
@@ -105,7 +93,6 @@ def check_gmail():
         for mid in mail_ids:
             if mid.decode() in seen_ids:
                 continue
-
             status, msg_data = mail.fetch(mid, "(RFC822)")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
@@ -113,7 +100,7 @@ def check_gmail():
             try:
                 email_date = parsedate_to_datetime(msg["Date"])
                 if email_date is None:
-                    raise ValueError("no date")
+                    raise ValueError
                 if email_date.tzinfo is None:
                     email_date = email_date.replace(tzinfo=timezone.utc)
                 else:
@@ -121,7 +108,6 @@ def check_gmail():
             except Exception:
                 email_date = now
 
-            # Only consider new emails (from last 1 hour)
             if email_date < now - timedelta(hours=1):
                 continue
 
@@ -129,30 +115,26 @@ def check_gmail():
             base, part = parse_subject(subject)
             if part is None:
                 continue
-
-            # Skip if already completed
             if base in completed_subjects and completed_subjects[base].get("completed"):
                 continue
 
-            if base not in new_parts:
-                new_parts[base] = set()
-            new_parts[base].add(part)
+            new_parts.setdefault(base, set()).add(part)
             seen_ids.add(mid.decode())
 
-        # Clean up IMAP
+        # close IMAP gracefully
         try:
             mail.close()
         except:
             pass
         mail.logout()
 
-        # Merge new data
+        # merge and alert
         for base, parts in new_parts.items():
             prev = set(completed_subjects.get(base, {}).get("received", []))
             updated = prev.union(parts)
-
             if updated == EXPECTED_PARTS:
-                send_alert(base)
+                if not completed_subjects.get(base, {}).get("completed", False):
+                    send_alert(base)
                 completed_subjects[base] = {"received": list(updated), "completed": True}
             else:
                 completed_subjects[base] = {"received": list(updated), "completed": False}
@@ -160,15 +142,11 @@ def check_gmail():
         state["completed_subjects"] = completed_subjects
         state["seen_ids"] = list(seen_ids)
         save_state(state)
-
-        print(f"✅ Completed check at {now}. Exiting...")
+        print(f"✅ Completed check at {now}. Exiting…")
 
     except Exception as e:
-        print(f"❌ Error during check: {e}")
-
+        print(f"❌ Error: {e}")
     finally:
-        # ✅ Ensure clean exit
-        import sys
         sys.exit(0)
 
 
