@@ -2,7 +2,7 @@ name: Email Alert Checker
 
 on:
   schedule:
-    - cron: "0 * * * *"  # Runs every hour (UTC time)
+    - cron: "*/1 * * * *"  # Runs every minute (UTC time)
   workflow_dispatch:      # Allows manual trigger from GitHub Actions tab
 
 jobs:
