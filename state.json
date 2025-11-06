@@ -1,0 +1,20 @@
+{
+  "last_check": "2025-11-03T14:50:52.233896+00:00",
+  "completed_subjects": {
+    "gfhfhjfj": {
+      "received": [
+        1
+      ],
+      "completed": false
+    },
+    "hi": {
+      "received": [
+        1,
+        2,
+        3
+      ],
+      "completed": true
+    }
+  },
+  "seen_ids": []
+}

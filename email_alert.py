@@ -28,7 +28,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"completed_subjects": {}, "seen_ids": []}
+        return {"completed_subjects": {}, "seen_ids": [], "alerted_subjects": set()}
     with open(STATE_PATH, "r") as f:
         return json.load(f)
 
@@ -76,6 +76,7 @@ def check_gmail():
         state = load_state()
         completed_subjects = state.get("completed_subjects", {})
         seen_ids = set(state.get("seen_ids", []))
+        alerted_subjects = state.get("alerted_subjects", set())  # Track alerted subjects
         now = datetime.now(timezone.utc)
 
         mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
@@ -134,14 +135,16 @@ def check_gmail():
             prev = set(completed_subjects.get(base, {}).get("received", []))
             updated = prev.union(parts)
             if updated == EXPECTED_PARTS:
-                if not completed_subjects.get(base, {}).get("completed", False):
-                    send_alert(base)
+                if base not in alerted_subjects:  # Check if alert already sent
+                    send_alert(base)  # Send alert only once
+                    alerted_subjects.add(base)  # Mark subject as alerted
                 completed_subjects[base] = {"received": list(updated), "completed": True}
             else:
                 completed_subjects[base] = {"received": list(updated), "completed": False}
 
         state["completed_subjects"] = completed_subjects
         state["seen_ids"] = list(seen_ids)
+        state["alerted_subjects"] = list(alerted_subjects)  # Save alerted subjects to state
         save_state(state)
         print(f"✅ Completed check at {now}. Exiting…")
 
@@ -151,8 +154,8 @@ def check_gmail():
         sys.exit(0)
 
 
-# ---------------- Run Once ----------------
+# ---------------- Run Every 30 Seconds ----------------
 if __name__ == "__main__":
     while True:
-        check_gmail()
-        time.sleep(30) 
+        check_gmail()  # Run the Gmail check and alert logic
+        time.sleep(30)  # Wait for 30 seconds before the next check

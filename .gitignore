@@ -6,7 +6,6 @@ __pycache__/
 *.pyc
 
 # Ignore state and log files
-state.json
 alerts.log
 
 # Ignore virtual environments
