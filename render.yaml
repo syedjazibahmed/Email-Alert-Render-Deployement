@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: email-alert-worker
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python email_alert.py"
+    envVars:
+      - key: MONITOR_EMAIL
+        sync: false
+      - key: MONITOR_APP_PASSWORD
+        sync: false
+      - key: MONITOR_IMAP_SERVER
+        value: imap.gmail.com
+      - key: MONITOR_IMAP_PORT
+        value: "993"
+      - key: ALERT_EMAIL_SENDER
+        sync: false
+      - key: ALERT_EMAIL_PASSWORD
+        sync: false
+      - key: ALERT_EMAIL_RECIPIENT
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"

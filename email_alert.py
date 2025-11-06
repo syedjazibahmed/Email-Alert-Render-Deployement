@@ -3,6 +3,7 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, parsedate_to_datetime
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+import time
 
 # ---------------- Config ----------------
 STATE_PATH = "state.json"
@@ -152,4 +153,6 @@ def check_gmail():
 
 # ---------------- Run Once ----------------
 if __name__ == "__main__":
-    check_gmail()
+    while True:
+        check_gmail()
+        time.sleep(30) 
