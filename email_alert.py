@@ -28,7 +28,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 # ---------------- State Management ----------------
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"completed_subjects": {}, "seen_ids": [], "alerted_subjects": set()}
+        return {"completed_subjects": {}, "seen_ids": [], "alerted_subjects": set(), "processed_subjects": set()}
     with open(STATE_PATH, "r") as f:
         return json.load(f)
 
@@ -77,6 +77,7 @@ def check_gmail():
         completed_subjects = state.get("completed_subjects", {})
         seen_ids = set(state.get("seen_ids", []))
         alerted_subjects = state.get("alerted_subjects", set())  # Track alerted subjects
+        processed_subjects = state.get("processed_subjects", set())  # Track already processed subjects
         now = datetime.now(timezone.utc)
 
         mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
@@ -117,6 +118,11 @@ def check_gmail():
             base, part = parse_subject(subject)
             if part is None:
                 continue
+
+            # Skip already processed subjects (those that have already been alerted)
+            if base in processed_subjects:
+                continue
+
             if base in completed_subjects and completed_subjects[base].get("completed"):
                 continue
 
@@ -139,12 +145,14 @@ def check_gmail():
                     send_alert(base)  # Send alert only once
                     alerted_subjects.add(base)  # Mark subject as alerted
                 completed_subjects[base] = {"received": list(updated), "completed": True}
+                processed_subjects.add(base)  # Mark as processed (alert sent)
             else:
                 completed_subjects[base] = {"received": list(updated), "completed": False}
 
         state["completed_subjects"] = completed_subjects
         state["seen_ids"] = list(seen_ids)
         state["alerted_subjects"] = list(alerted_subjects)  # Save alerted subjects to state
+        state["processed_subjects"] = list(processed_subjects)  # Save processed subjects
         save_state(state)
         print(f"✅ Completed check at {now}. Exiting…")
 
