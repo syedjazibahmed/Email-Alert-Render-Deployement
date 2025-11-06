@@ -3,7 +3,6 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, parsedate_to_datetime
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
-import time  # Ensure we import the 'time' module
 
 # ---------------- Config ----------------
 STATE_PATH = "state.json"
@@ -83,98 +82,96 @@ def parse_subject(subject):
 
 # ---------------- Gmail Checker ----------------
 def check_gmail():
-    state = load_state()
-    completed_subjects = state.get("completed_subjects", {})
-    seen_ids = set(state.get("seen_ids", []))  # Track email IDs to avoid reprocessing emails
+    try:
+        state = load_state()
+        completed_subjects = state.get("completed_subjects", {})
+        seen_ids = set(state.get("seen_ids", []))
 
-    now = datetime.now(timezone.utc)
-    mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
-    mail.login(MONITOR_EMAIL, MONITOR_PASS)
-    mail.select("inbox")
+        now = datetime.now(timezone.utc)
+        mail = imaplib.IMAP4_SSL(MONITOR_IMAP, MONITOR_PORT)
+        mail.login(MONITOR_EMAIL, MONITOR_PASS)
+        mail.select("inbox")
 
-    # Search all messages from today (to limit the scope)
-    since_date = (now - timedelta(days=1)).strftime("%d-%b-%Y")
-    status, data = mail.search(None, f'(SINCE "{since_date}")')
+        since_date = (now - timedelta(days=1)).strftime("%d-%b-%Y")
+        status, data = mail.search(None, f'(SINCE "{since_date}")')
 
-    if status != "OK":
-        print("⚠️ No messages found or search failed.")
-        mail.close()
+        if status != "OK":
+            print("⚠️ No messages found or search failed.")
+            return
+
+        mail_ids = data[0].split()
+        new_parts = {}
+
+        for mid in mail_ids:
+            if mid.decode() in seen_ids:
+                continue
+
+            status, msg_data = mail.fetch(mid, "(RFC822)")
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
+
+            try:
+                email_date = parsedate_to_datetime(msg["Date"])
+                if email_date is None:
+                    raise ValueError("no date")
+                if email_date.tzinfo is None:
+                    email_date = email_date.replace(tzinfo=timezone.utc)
+                else:
+                    email_date = email_date.astimezone(timezone.utc)
+            except Exception:
+                email_date = now
+
+            # Only consider new emails (from last 1 hour)
+            if email_date < now - timedelta(hours=1):
+                continue
+
+            subject = msg["Subject"] or "No Subject"
+            base, part = parse_subject(subject)
+            if part is None:
+                continue
+
+            # Skip if already completed
+            if base in completed_subjects and completed_subjects[base].get("completed"):
+                continue
+
+            if base not in new_parts:
+                new_parts[base] = set()
+            new_parts[base].add(part)
+            seen_ids.add(mid.decode())
+
+        # Clean up IMAP
+        try:
+            mail.close()
+        except:
+            pass
         mail.logout()
-        return
 
-    mail_ids = data[0].split()
-    new_parts = {}
+        # Merge new data
+        for base, parts in new_parts.items():
+            prev = set(completed_subjects.get(base, {}).get("received", []))
+            updated = prev.union(parts)
 
-    for mid in mail_ids:
-        # Skip if this email ID has been processed already
-        if mid.decode() in seen_ids:
-            continue
-
-        # Fetch the email
-        status, msg_data = mail.fetch(mid, "(RFC822)")
-        raw = msg_data[0][1]
-        msg = email.message_from_bytes(raw)
-
-        try:
-            email_date = parsedate_to_datetime(msg["Date"])
-            if email_date is None:
-                raise ValueError("no date")
-            if email_date.tzinfo is None:
-                email_date = email_date.replace(tzinfo=timezone.utc)
+            if updated == EXPECTED_PARTS:
+                send_alert(base)
+                completed_subjects[base] = {"received": list(updated), "completed": True}
             else:
-                email_date = email_date.astimezone(timezone.utc)
-        except Exception:
-            email_date = now
+                completed_subjects[base] = {"received": list(updated), "completed": False}
 
-        # Only consider new emails (from the last 1 hour)
-        if email_date < now - timedelta(hours=1):
-            continue
+        state["completed_subjects"] = completed_subjects
+        state["seen_ids"] = list(seen_ids)
+        save_state(state)
 
-        subject = msg["Subject"] or "No Subject"
-        base, part = parse_subject(subject)
-        if part is None:
-            continue
+        print(f"✅ Completed check at {now}. Exiting...")
 
-        # Skip if subject already completed
-        if base in completed_subjects and completed_subjects[base].get("completed"):
-            continue
+    except Exception as e:
+        print(f"❌ Error during check: {e}")
 
-        # Track received parts
-        if base not in new_parts:
-            new_parts[base] = set()
-        new_parts[base].add(part)
-
-        # Mark the email as seen (add its unique ID to seen_ids)
-        seen_ids.add(mid.decode())
-
-    mail.close()
-    mail.logout()
-
-    # Merge with previous state and check for completion
-    for base, parts in new_parts.items():
-        prev = set(completed_subjects.get(base, {}).get("received", []))
-        updated = prev.union(parts)
-
-        if updated == EXPECTED_PARTS:
-            send_alert(base)
-            completed_subjects[base] = {"received": list(updated), "completed": True}
-        else:
-            completed_subjects[base] = {"received": list(updated), "completed": False}
-
-    # Save new state (including seen email IDs)
-    state["completed_subjects"] = completed_subjects
-    state["seen_ids"] = list(seen_ids)
-    save_state(state)
-
-    print(f"✅ Completed check at {now}. Exiting...")
+    finally:
+        # ✅ Ensure clean exit
+        import sys
+        sys.exit(0)
 
 
-# ---------------- Continuous Run ----------------
+# ---------------- Run Once ----------------
 if __name__ == "__main__":
-    while True:
-        try:
-            check_gmail()
-        except Exception as e:
-            print(f"❌ Error: {e}")
-        print(f"⏳ Sleeping for 60 seconds before checking again...\n")
-        time.sleep(60)  # Check every minute for new emails
+    check_gmail()
